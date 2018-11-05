@@ -8,6 +8,7 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
+	"sync"
 	"time"
 
 	"k8s.io/api/core/v1"
@@ -32,8 +33,14 @@ type Provider struct {
 	nodeName           string
 	internalIP         string
 	daemonEndpointPort int32
-	pods               map[string]*v1.Pod
+	pods               map[string]runningPod
 	config             Config
+	podsLock           sync.Mutex
+}
+
+type runningPod struct {
+	pod             *v1.Pod
+	attainedSeconds int32
 }
 
 // Config contains a simulated virtual-kubelet's configurable parameters.
@@ -54,7 +61,7 @@ func NewSimProvider(providerConfig, nodeName string, internalIP string, daemonEn
 		nodeName:           nodeName,
 		internalIP:         internalIP,
 		daemonEndpointPort: daemonEndpointPort,
-		pods:               make(map[string]*v1.Pod),
+		pods:               make(map[string]runningPod),
 		config:             config,
 	}
 	return &provider, nil
@@ -106,6 +113,16 @@ func loadConfig(providerConfig, nodeName string) (config Config, err error) {
 	return config, nil
 }
 
+func (p *Provider) updateClock() {
+	p.podsLock.Lock()
+	defer p.podsLock.Unlock()
+
+	for _, pod := range p.pods {
+		_ = pod
+		// TODO: pod.attainedSeconds +=
+	}
+}
+
 // CreatePod accepts a Pod definition and stores it in memory.
 func (p *Provider) CreatePod(ctx context.Context, pod *v1.Pod) error {
 	log.Printf("receive CreatePod %q\n", pod.Name)
@@ -121,7 +138,10 @@ func (p *Provider) CreatePod(ctx context.Context, pod *v1.Pod) error {
 	}
 	_ = simSpec
 
-	p.pods[key] = pod
+	p.podsLock.Lock()
+	defer p.podsLock.Unlock()
+
+	p.pods[key] = runningPod{pod, 0}
 
 	return nil
 }
@@ -135,7 +155,16 @@ func (p *Provider) UpdatePod(ctx context.Context, pod *v1.Pod) error {
 		return err
 	}
 
-	p.pods[key] = pod
+	p.podsLock.Lock()
+	defer p.podsLock.Unlock()
+
+	assignedPod, ok := p.pods[key]
+	if !ok {
+		return fmt.Errorf("Pod %v does not exist", key)
+	}
+
+	assignedPod.pod = pod
+	p.pods[key] = assignedPod
 
 	return nil
 }
@@ -148,6 +177,9 @@ func (p *Provider) DeletePod(ctx context.Context, pod *v1.Pod) (err error) {
 	if err != nil {
 		return err
 	}
+
+	p.podsLock.Lock()
+	defer p.podsLock.Unlock()
 
 	delete(p.pods, key)
 
@@ -163,8 +195,11 @@ func (p *Provider) GetPod(ctx context.Context, namespace, name string) (pod *v1.
 		return nil, err
 	}
 
+	p.podsLock.Lock()
+	defer p.podsLock.Unlock()
+
 	if pod, ok := p.pods[key]; ok {
-		return pod, nil
+		return pod.pod, nil
 	}
 
 	return nil, nil
@@ -243,10 +278,12 @@ func (p *Provider) GetPodStatus(ctx context.Context, namespace, name string) (*v
 func (p *Provider) GetPods(ctx context.Context) ([]*v1.Pod, error) {
 	log.Printf("receive GetPods\n")
 
-	var pods []*v1.Pod
+	p.podsLock.Lock()
+	defer p.podsLock.Unlock()
 
+	var pods []*v1.Pod
 	for _, pod := range p.pods {
-		pods = append(pods, pod)
+		pods = append(pods, pod.pod)
 	}
 
 	return pods, nil
