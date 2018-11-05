@@ -115,6 +115,12 @@ func (p *SimProvider) CreatePod(ctx context.Context, pod *v1.Pod) error {
 		return err
 	}
 
+	simSpec, err := parseSimSpec(pod)
+	if err != nil {
+		return err
+	}
+	log.Printf("parseSimSpec: %v\n", simSpec)
+
 	p.pods[key] = pod
 
 	return nil
@@ -345,4 +351,37 @@ func buildKey(pod *v1.Pod) (string, error) {
 	}
 
 	return buildKeyFromNames(pod.ObjectMeta.Namespace, pod.ObjectMeta.Name)
+}
+
+type simSpec []simSpecPhase
+
+type simSpecPhase struct {
+	Seconds int32  `json:"seconds"`
+	CPU     string `json:"cpu"`
+	Memory  string `json:"memory"`
+	GPU     int32  `json:"nvidia.com/gpu"`
+}
+
+func parseSimSpec(pod *v1.Pod) (simSpec, error) {
+	simSpecJSON, ok := pod.ObjectMeta.Annotations["simSpec"]
+	if !ok {
+		return nil, fmt.Errorf("simSpec not defined")
+	}
+
+	simSpec := []simSpecPhase{}
+	err := json.Unmarshal([](byte)(simSpecJSON), &simSpec)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, phase := range simSpec {
+		if _, err = resource.ParseQuantity(phase.CPU); err != nil {
+			return nil, fmt.Errorf("Invalid CPU value %v", phase.CPU)
+		}
+		if _, err = resource.ParseQuantity(phase.Memory); err != nil {
+			return nil, fmt.Errorf("Invalid memory value %v", phase.Memory)
+		}
+	}
+
+	return simSpec, nil
 }
