@@ -20,10 +20,11 @@ import (
 )
 
 const (
-	// Provider configuration defaults.
-	defaultCPUCapacity    = "20"
-	defaultMemoryCapacity = "100Gi"
+	// Provider configuration defaults
+	defaultCPUCapacity    = "16"
+	defaultMemoryCapacity = "64Gi"
 	defaultPodCapacity    = "20"
+
 	// Operating system representation
 	operatingSystemSimulated = "Simulated"
 )
@@ -43,6 +44,15 @@ type Config struct {
 	CPU    string `json:"cpu,omitempty"`
 	Memory string `json:"memory,omitempty"`
 	Pods   string `json:"pods,omitempty"`
+}
+
+type simSpec []simSpecPhase
+
+type simSpecPhase struct {
+	Seconds int32  `json:"seconds"`
+	CPU     string `json:"cpu"`
+	Memory  string `json:"memory"`
+	GPU     int32  `json:"nvidia.com/gpu"`
 }
 
 // NewSimProvider creates a new SimProvider
@@ -99,14 +109,15 @@ func loadConfig(providerConfig, nodeName string) (Config, error) {
 	}
 
 	if _, err = resource.ParseQuantity(config.CPU); err != nil {
-		return config, fmt.Errorf("Invalid CPU value %v", config.CPU)
+		return config, fmt.Errorf("Invalid CPU value %q", config.CPU)
 	}
 	if _, err = resource.ParseQuantity(config.Memory); err != nil {
-		return config, fmt.Errorf("Invalid memory value %v", config.Memory)
+		return config, fmt.Errorf("Invalid memory value %q", config.Memory)
 	}
 	if _, err = resource.ParseQuantity(config.Pods); err != nil {
-		return config, fmt.Errorf("Invalid pods value %v", config.Pods)
+		return config, fmt.Errorf("Invalid pods value %q", config.Pods)
 	}
+
 	return config, nil
 }
 
@@ -149,14 +160,6 @@ func (p *Provider) UpdatePod(ctx context.Context, pod *v1.Pod) error {
 	// TODO: Existence checking needed?
 	// TODO: Keeping AttainedService needed?
 
-	// simPod, ok := p.pods.Load(key)
-	// if !ok {
-	// 	return fmt.Errorf("Pod %v does not exist", key)
-	// }
-	//
-	// simPod.Pod = pod
-	// p.pods.Store(key, simPod)
-
 	p.pods.Store(key, simpod.RunningPod{Pod: pod, AttainedSeconds: 0})
 
 	return nil
@@ -194,6 +197,7 @@ func (p *Provider) GetPod(ctx context.Context, namespace, name string) (*v1.Pod,
 }
 
 // GetContainerLogs retrieves the logs of a container by name from the provider.
+// TODO: Implementation
 func (p *Provider) GetContainerLogs(ctx context.Context, namespace, podName, containerName string, tail int) (string, error) {
 	log.Printf("receive GetContainerLogs %q\n", podName)
 	return "", nil
@@ -202,6 +206,7 @@ func (p *Provider) GetContainerLogs(ctx context.Context, namespace, podName, con
 // GetPodFullName gets full pod name as defined in the provider context
 // TODO: Implementation
 func (p *Provider) GetPodFullName(namespace string, pod string) string {
+	log.Printf("receive GetPodFullName %q, %q\n", namespace, pod)
 	return ""
 }
 
@@ -359,10 +364,6 @@ func (p *Provider) OperatingSystem() string {
 	return operatingSystemSimulated
 }
 
-func buildKeyFromNames(namespace string, name string) (string, error) {
-	return fmt.Sprintf("%s-%s", namespace, name), nil
-}
-
 // buildKey is a helper for building the "key" for the providers pod store.
 func buildKey(pod *v1.Pod) (string, error) {
 	if pod.ObjectMeta.Namespace == "" {
@@ -376,13 +377,8 @@ func buildKey(pod *v1.Pod) (string, error) {
 	return buildKeyFromNames(pod.ObjectMeta.Namespace, pod.ObjectMeta.Name)
 }
 
-type simSpec []simSpecPhase
-
-type simSpecPhase struct {
-	Seconds int32  `json:"seconds"`
-	CPU     string `json:"cpu"`
-	Memory  string `json:"memory"`
-	GPU     int32  `json:"nvidia.com/gpu"`
+func buildKeyFromNames(namespace string, name string) (string, error) {
+	return fmt.Sprintf("%s-%s", namespace, name), nil
 }
 
 func parseSimSpec(pod *v1.Pod) (simSpec, error) {
@@ -399,10 +395,10 @@ func parseSimSpec(pod *v1.Pod) (simSpec, error) {
 
 	for _, phase := range simSpec {
 		if _, err = resource.ParseQuantity(phase.CPU); err != nil {
-			return nil, fmt.Errorf("Invalid CPU value %v", phase.CPU)
+			return nil, fmt.Errorf("Invalid CPU value %q", phase.CPU)
 		}
 		if _, err = resource.ParseQuantity(phase.Memory); err != nil {
-			return nil, fmt.Errorf("Invalid memory value %v", phase.Memory)
+			return nil, fmt.Errorf("Invalid memory value %q", phase.Memory)
 		}
 	}
 
