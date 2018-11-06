@@ -60,6 +60,8 @@ func NewSimProvider(providerConfig, nodeName string, internalIP string, daemonEn
 		pods:               &podMap{},
 		config:             config,
 	}
+
+	go updateNode(&provider, 1*time.Second)
 	return &provider, nil
 }
 
@@ -116,12 +118,17 @@ func loadConfig(providerConfig, nodeName string) (Config, error) {
 	return config, nil
 }
 
-// func (p *Provider) updateClock() {
-// 	for _, pod := range p.pods {
-// 		_ = pod
-// 		// TODO: pod.attainedSeconds +=
-// 	}
-// }
+func updateNode(p *Provider, interval time.Duration) {
+	for {
+		now := time.Now()
+		p.pods.foreach(func(key string, pod simPod) bool {
+			log.Printf("now: %v, start: %v, diff: %v\n", now, pod.startTime, now.Sub(pod.startTime))
+			return true
+		})
+
+		time.Sleep(interval)
+	}
+}
 
 // CreatePod accepts a Pod definition and stores it in memory.
 func (p *Provider) CreatePod(ctx context.Context, pod *v1.Pod) error {
@@ -132,7 +139,7 @@ func (p *Provider) CreatePod(ctx context.Context, pod *v1.Pod) error {
 		return err
 	}
 
-	now := metav1.NewTime(time.Now())
+	now := time.Now()
 
 	simSpec, err := parseSimSpec(pod)
 	if err != nil {
@@ -189,7 +196,6 @@ func (p *Provider) UpdatePod(ctx context.Context, pod *v1.Pod) error {
 		return fmt.Errorf("pod %q does not exist", key)
 	}
 
-	// TODO: Reschedule needed?
 	simPod.pod = pod
 	p.pods.store(key, simPod)
 
@@ -282,11 +288,13 @@ func (p *Provider) GetPodStatus(ctx context.Context, namespace, name string) (*v
 		}, nil
 	}
 
+	startTime := metav1.NewTime(pod.startTime)
+
 	status := &v1.PodStatus{
 		Phase:     v1.PodRunning,
 		HostIP:    "1.2.3.4",
 		PodIP:     "5.6.7.8",
-		StartTime: &pod.startTime,
+		StartTime: &startTime,
 		Conditions: []v1.PodCondition{
 			{
 				Type:   v1.PodInitialized,
@@ -311,7 +319,7 @@ func (p *Provider) GetPodStatus(ctx context.Context, namespace, name string) (*v
 			RestartCount: 0,
 			State: v1.ContainerState{
 				Running: &v1.ContainerStateRunning{
-					StartedAt: pod.startTime,
+					StartedAt: startTime,
 				},
 			},
 		})

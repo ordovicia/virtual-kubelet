@@ -2,9 +2,9 @@ package sim
 
 import (
 	"sync"
+	"time"
 
 	"k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // podMap stores a map associating pod "key" with *v1.Pod.
@@ -16,7 +16,7 @@ type podMap struct {
 // simPod represents a pod in the node with attained time
 type simPod struct {
 	pod            *v1.Pod
-	startTime      metav1.Time
+	startTime      time.Time
 	isOverCapacity bool
 	spec           simSpec
 }
