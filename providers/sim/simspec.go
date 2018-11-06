@@ -11,31 +11,46 @@ import (
 type simSpec []simSpecPhase
 
 type simSpecPhase struct {
-	Seconds int32  `json:"seconds"`
-	CPU     string `json:"cpu"`
-	Memory  string `json:"memory"`
-	GPU     int32  `json:"nvidia.com/gpu"`
+	seconds  int32
+	resource simResource
 }
 
 func parseSimSpec(pod *v1.Pod) (simSpec, error) {
-	simSpecJSON, ok := pod.ObjectMeta.Annotations["simSpec"]
+	type simSpecPhaseJSON struct {
+		Seconds int32  `json:"seconds"`
+		CPU     string `json:"cpu"`
+		Memory  string `json:"memory"`
+		GPU     int64  `json:"nvidia.com/gpu,omitempty"`
+	}
+
+	simSpecAnnotation, ok := pod.ObjectMeta.Annotations["simSpec"]
 	if !ok {
 		return nil, fmt.Errorf("simSpec not defined")
 	}
 
-	simSpec := []simSpecPhase{}
-	err := json.Unmarshal([](byte)(simSpecJSON), &simSpec)
+	simSpecJSON := []simSpecPhaseJSON{}
+	err := json.Unmarshal([](byte)(simSpecAnnotation), &simSpecJSON)
 	if err != nil {
 		return nil, err
 	}
 
-	for _, phase := range simSpec {
-		if _, err = resource.ParseQuantity(phase.CPU); err != nil {
+	simSpec := simSpec{}
+	for _, phase := range simSpecJSON {
+		cpu, err := resource.ParseQuantity(phase.CPU)
+		if err != nil {
 			return nil, fmt.Errorf("Invalid CPU value %q", phase.CPU)
 		}
-		if _, err = resource.ParseQuantity(phase.Memory); err != nil {
+		milliCPU := cpu.MilliValue()
+
+		mem, err := resource.ParseQuantity(phase.Memory)
+		if err != nil {
 			return nil, fmt.Errorf("Invalid memory value %q", phase.Memory)
 		}
+		memory := mem.Value()
+
+		gpu := phase.GPU
+		p := simSpecPhase{seconds: phase.Seconds, resource: simResource{milliCPU, memory, gpu}}
+		simSpec = append(simSpec, p)
 	}
 
 	return simSpec, nil

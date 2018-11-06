@@ -15,8 +15,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/remotecommand"
-
-	"github.com/virtual-kubelet/virtual-kubelet/providers/sim/simpod"
 )
 
 const (
@@ -37,7 +35,7 @@ type Provider struct {
 	internalIP         string
 	daemonEndpointPort int32
 	config             Config
-	pods               *simpod.PodMap
+	pods               *podMap
 }
 
 // Config contains a simulated virtual-kubelet's configurable parameters.
@@ -59,7 +57,7 @@ func NewSimProvider(providerConfig, nodeName string, internalIP string, daemonEn
 		nodeName:           nodeName,
 		internalIP:         internalIP,
 		daemonEndpointPort: daemonEndpointPort,
-		pods:               simpod.New(),
+		pods:               &podMap{},
 		config:             config,
 	}
 	return &provider, nil
@@ -134,30 +132,32 @@ func (p *Provider) CreatePod(ctx context.Context, pod *v1.Pod) error {
 		return err
 	}
 
+	now := metav1.NewTime(time.Now())
+
 	simSpec, err := parseSimSpec(pod)
 	if err != nil {
 		return err
 	}
-	_ = simSpec // TODO
 
-	now := metav1.NewTime(time.Now())
+	simPod := simPod{pod: pod, startTime: now, spec: simSpec}
 
 	newTotalReq := p.totalResourceReq().add(getResourceReq(pod))
 	cap := p.Capacity(ctx)
 	if isOverCapacity(newTotalReq, cap) || p.runningPodsNum() >= cap.Pods().Value() {
-		p.pods.Store(key, simpod.SimPod{Pod: pod, StartTime: now, IsOverCapacity: true})
+		simPod.isOverCapacity = true
 	} else {
-		p.pods.Store(key, simpod.SimPod{Pod: pod, StartTime: now, IsOverCapacity: false})
+		simPod.isOverCapacity = false
 	}
+	p.pods.store(key, simPod)
 
 	return nil
 }
 
 func (p *Provider) totalResourceReq() simResource {
 	resourceReq := simResource{}
-	p.pods.Range(func(_ string, pod simpod.SimPod) bool {
-		if !pod.IsOverCapacity {
-			resourceReq = resourceReq.add(getResourceReq(pod.Pod))
+	p.pods.foreach(func(_ string, pod simPod) bool {
+		if !pod.isOverCapacity {
+			resourceReq = resourceReq.add(getResourceReq(pod.pod))
 		}
 		return true
 	})
@@ -166,8 +166,8 @@ func (p *Provider) totalResourceReq() simResource {
 
 func (p *Provider) runningPodsNum() int64 {
 	podsNum := int64(0)
-	p.pods.Range(func(_ string, pod simpod.SimPod) bool {
-		if !pod.IsOverCapacity {
+	p.pods.foreach(func(_ string, pod simPod) bool {
+		if !pod.isOverCapacity {
 			podsNum++
 		}
 		return true
@@ -184,14 +184,14 @@ func (p *Provider) UpdatePod(ctx context.Context, pod *v1.Pod) error {
 		return err
 	}
 
-	simPod, ok := p.pods.Load(key)
+	simPod, ok := p.pods.load(key)
 	if !ok {
 		return fmt.Errorf("pod %q does not exist", key)
 	}
 
 	// TODO: Reschedule needed?
-	simPod.Pod = pod
-	p.pods.Store(key, simPod)
+	simPod.pod = pod
+	p.pods.store(key, simPod)
 
 	return nil
 }
@@ -205,7 +205,7 @@ func (p *Provider) DeletePod(ctx context.Context, pod *v1.Pod) error {
 		return err
 	}
 
-	p.pods.Delete(key)
+	p.pods.delete(key)
 
 	return nil
 }
@@ -222,16 +222,16 @@ func (p *Provider) GetPod(ctx context.Context, namespace, name string) (*v1.Pod,
 		return nil, nil
 	}
 
-	return pod.Pod, nil
+	return pod.pod, nil
 }
 
-func (p *Provider) getSimPod(namespace, name string) (*simpod.SimPod, error) {
+func (p *Provider) getSimPod(namespace, name string) (*simPod, error) {
 	key, err := buildKeyFromNames(namespace, name)
 	if err != nil {
 		return nil, err
 	}
 
-	pod, ok := p.pods.Load(key)
+	pod, ok := p.pods.load(key)
 	if !ok {
 		return nil, nil
 	}
@@ -274,7 +274,7 @@ func (p *Provider) GetPodStatus(ctx context.Context, namespace, name string) (*v
 		return nil, nil
 	}
 
-	if pod.IsOverCapacity {
+	if pod.isOverCapacity {
 		return &v1.PodStatus{
 			Phase:   v1.PodFailed,
 			Reason:  "CapacityExceeded",
@@ -286,7 +286,7 @@ func (p *Provider) GetPodStatus(ctx context.Context, namespace, name string) (*v
 		Phase:     v1.PodRunning,
 		HostIP:    "1.2.3.4",
 		PodIP:     "5.6.7.8",
-		StartTime: &pod.StartTime,
+		StartTime: &pod.startTime,
 		Conditions: []v1.PodCondition{
 			{
 				Type:   v1.PodInitialized,
@@ -303,7 +303,7 @@ func (p *Provider) GetPodStatus(ctx context.Context, namespace, name string) (*v
 		},
 	}
 
-	for _, container := range pod.Pod.Spec.Containers {
+	for _, container := range pod.pod.Spec.Containers {
 		status.ContainerStatuses = append(status.ContainerStatuses, v1.ContainerStatus{
 			Name:         container.Name,
 			Image:        container.Image,
@@ -311,7 +311,7 @@ func (p *Provider) GetPodStatus(ctx context.Context, namespace, name string) (*v
 			RestartCount: 0,
 			State: v1.ContainerState{
 				Running: &v1.ContainerStateRunning{
-					StartedAt: pod.StartTime,
+					StartedAt: pod.startTime,
 				},
 			},
 		})
@@ -323,7 +323,7 @@ func (p *Provider) GetPodStatus(ctx context.Context, namespace, name string) (*v
 // GetPods returns a list of all pods known to be "running".
 func (p *Provider) GetPods(ctx context.Context) ([]*v1.Pod, error) {
 	log.Printf("receive GetPods\n")
-	return p.pods.ListPods(), nil
+	return p.pods.listPods(), nil
 }
 
 // Capacity returns a resource list containing the capacity limits.
