@@ -8,7 +8,6 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
-	"sort"
 	"time"
 
 	"k8s.io/api/core/v1"
@@ -24,6 +23,7 @@ const (
 	// Provider configuration defaults
 	defaultCPUCapacity    = "16"
 	defaultMemoryCapacity = "64Gi"
+	defaultGPUCapacity    = "2"
 	defaultPodCapacity    = "20"
 
 	// Operating system representation
@@ -36,14 +36,16 @@ type Provider struct {
 	nodeName           string
 	internalIP         string
 	daemonEndpointPort int32
-	pods               *simpod.PodMap
 	config             Config
+	pods               *simpod.PodMap
+	totalResourceReq   simResource
 }
 
 // Config contains a simulated virtual-kubelet's configurable parameters.
 type Config struct {
 	CPU    string `json:"cpu,omitempty"`
 	Memory string `json:"memory,omitempty"`
+	GPU    string `json:"nvidia.com/gpu,omitempty"`
 	Pods   string `json:"pods,omitempty"`
 }
 
@@ -60,6 +62,7 @@ func NewSimProvider(providerConfig, nodeName string, internalIP string, daemonEn
 		daemonEndpointPort: daemonEndpointPort,
 		pods:               simpod.New(),
 		config:             config,
+		totalResourceReq:   simResource{},
 	}
 	return &provider, nil
 }
@@ -72,6 +75,7 @@ func loadConfig(providerConfig, nodeName string) (Config, error) {
 	if _, err := os.Stat(providerConfig); os.IsNotExist(err) {
 		config.CPU = defaultCPUCapacity
 		config.Memory = defaultMemoryCapacity
+		config.GPU = defaultGPUCapacity
 		config.Pods = defaultPodCapacity
 		return config, nil
 	}
@@ -94,6 +98,9 @@ func loadConfig(providerConfig, nodeName string) (Config, error) {
 		}
 		if config.Memory == "" {
 			config.Memory = defaultMemoryCapacity
+		}
+		if config.GPU == "" {
+			config.GPU = defaultGPUCapacity
 		}
 		if config.Pods == "" {
 			config.Pods = defaultPodCapacity
@@ -135,7 +142,15 @@ func (p *Provider) CreatePod(ctx context.Context, pod *v1.Pod) error {
 	}
 	_ = simSpec // TODO
 
-	p.pods.Store(key, simpod.RunningPod{Pod: pod, AttainedSeconds: 0})
+	now := metav1.NewTime(time.Now())
+
+	newTotalReq := getResourceReq(pod).add(p.totalResourceReq)
+	if isOverCapacity(newTotalReq, p.Capacity(ctx)) {
+		p.pods.Store(key, simpod.SimPod{Pod: pod, StartTime: now, IsOverCapacity: true})
+	} else {
+		p.totalResourceReq = newTotalReq
+		p.pods.Store(key, simpod.SimPod{Pod: pod, StartTime: now, IsOverCapacity: false})
+	}
 
 	return nil
 }
@@ -150,9 +165,10 @@ func (p *Provider) UpdatePod(ctx context.Context, pod *v1.Pod) error {
 	}
 
 	// TODO: Existence checking needed?
-	// TODO: Keeping AttainedService needed?
+	// TODO: Keeping StartTime needed?
 
-	p.pods.Store(key, simpod.RunningPod{Pod: pod, AttainedSeconds: 0})
+	now := metav1.NewTime(time.Now())
+	p.pods.Store(key, simpod.SimPod{Pod: pod, StartTime: now, IsOverCapacity: false})
 
 	return nil
 }
@@ -166,6 +182,7 @@ func (p *Provider) DeletePod(ctx context.Context, pod *v1.Pod) error {
 		return err
 	}
 
+	p.totalResourceReq = p.totalResourceReq.sub(getResourceReq(pod))
 	p.pods.Delete(key)
 
 	return nil
@@ -175,6 +192,18 @@ func (p *Provider) DeletePod(ctx context.Context, pod *v1.Pod) error {
 func (p *Provider) GetPod(ctx context.Context, namespace, name string) (*v1.Pod, error) {
 	log.Printf("receive GetPod %q\n", name)
 
+	pod, err := p.getSimPod(namespace, name)
+	if err != nil {
+		return nil, err
+	}
+	if pod == nil {
+		return nil, nil
+	}
+
+	return pod.Pod, nil
+}
+
+func (p *Provider) getSimPod(namespace, name string) (*simpod.SimPod, error) {
 	key, err := buildKeyFromNames(namespace, name)
 	if err != nil {
 		return nil, err
@@ -185,7 +214,7 @@ func (p *Provider) GetPod(ctx context.Context, namespace, name string) (*v1.Pod,
 		return nil, nil
 	}
 
-	return pod.Pod, nil
+	return &pod, nil
 }
 
 // GetContainerLogs retrieves the logs of a container by name from the provider.
@@ -215,28 +244,27 @@ func (p *Provider) ExecInContainer(name string, uid types.UID, container string,
 func (p *Provider) GetPodStatus(ctx context.Context, namespace, name string) (*v1.PodStatus, error) {
 	log.Printf("receive GetPodStatus %q\n", name)
 
-	pods := p.pods.ListPods()
-
-	// Respect the pod creation order when resolving conflicts
-	sort.Sort(podsByCreationTime(pods))
-	unfit := getUnfitPods(pods, p.Capacity(ctx))
-	for _, pod := range unfit {
-		if pod.Namespace == namespace && pod.Name == name {
-			return &v1.PodStatus{
-				Phase:   v1.PodFailed,
-				Reason:  "CapacityExceeded",
-				Message: "Pod cannot be started due to exceeded capacity",
-			}, nil
-		}
+	pod, err := p.getSimPod(namespace, name)
+	if err != nil {
+		return nil, err
+	}
+	if pod == nil {
+		return nil, nil
 	}
 
-	now := metav1.NewTime(time.Now()) // TODO: correct?
+	if pod.IsOverCapacity {
+		return &v1.PodStatus{
+			Phase:   v1.PodFailed,
+			Reason:  "CapacityExceeded",
+			Message: "Pod cannot be started due to exceeded capacity",
+		}, nil
+	}
 
 	status := &v1.PodStatus{
 		Phase:     v1.PodRunning,
 		HostIP:    "1.2.3.4",
 		PodIP:     "5.6.7.8",
-		StartTime: &now,
+		StartTime: &pod.StartTime,
 		Conditions: []v1.PodCondition{
 			{
 				Type:   v1.PodInitialized,
@@ -253,12 +281,7 @@ func (p *Provider) GetPodStatus(ctx context.Context, namespace, name string) (*v
 		},
 	}
 
-	pod, err := p.GetPod(ctx, namespace, name)
-	if err != nil {
-		return status, err
-	}
-
-	for _, container := range pod.Spec.Containers {
+	for _, container := range pod.Pod.Spec.Containers {
 		status.ContainerStatuses = append(status.ContainerStatuses, v1.ContainerStatus{
 			Name:         container.Name,
 			Image:        container.Image,
@@ -266,7 +289,7 @@ func (p *Provider) GetPodStatus(ctx context.Context, namespace, name string) (*v
 			RestartCount: 0,
 			State: v1.ContainerState{
 				Running: &v1.ContainerStateRunning{
-					StartedAt: now,
+					StartedAt: pod.StartTime,
 				},
 			},
 		})
@@ -284,9 +307,10 @@ func (p *Provider) GetPods(ctx context.Context) ([]*v1.Pod, error) {
 // Capacity returns a resource list containing the capacity limits.
 func (p *Provider) Capacity(ctx context.Context) v1.ResourceList {
 	return v1.ResourceList{
-		"cpu":    resource.MustParse(p.config.CPU),
-		"memory": resource.MustParse(p.config.Memory),
-		"pods":   resource.MustParse(p.config.Pods),
+		"cpu":            resource.MustParse(p.config.CPU),
+		"memory":         resource.MustParse(p.config.Memory),
+		"nvidia.com/gpu": resource.MustParse(p.config.GPU),
+		"pods":           resource.MustParse(p.config.Pods),
 	}
 }
 
