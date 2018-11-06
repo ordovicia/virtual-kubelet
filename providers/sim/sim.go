@@ -121,8 +121,40 @@ func loadConfig(providerConfig, nodeName string) (Config, error) {
 func updateNode(p *Provider, interval time.Duration) {
 	for {
 		now := time.Now()
+
 		p.pods.foreach(func(key string, pod simPod) bool {
-			log.Printf("now: %v, start: %v, diff: %v\n", now, pod.startTime, now.Sub(pod.startTime))
+			passedSeconds := int32(now.Sub(pod.startTime).Seconds())
+			phaseSecondsAcc := int32(0)
+			resourceUsage := simResource{}
+			terminated := true
+
+			log.Printf("now: %v, start: %v, diff: %v\n", now, pod.startTime, passedSeconds)
+
+			for _, phase := range pod.spec {
+				if passedSeconds < phaseSecondsAcc+phase.seconds {
+					resourceUsage = phase.resource
+					terminated = false
+					break
+				}
+
+				phaseSecondsAcc += phase.seconds
+			}
+
+			if terminated {
+				log.Printf("pod %v terminated", pod.pod.Name)
+				p.pods.delete(key)
+
+				startTime := metav1.NewTime(pod.startTime)
+				status := buildPodStatus(&pod, v1.PodSucceeded, startTime,
+					v1.ContainerState{
+						Terminated: &v1.ContainerStateTerminated{
+							StartedAt: startTime,
+						}})
+				_ = status
+			} else {
+				_ = resourceUsage
+			}
+
 			return true
 		})
 
@@ -289,9 +321,17 @@ func (p *Provider) GetPodStatus(ctx context.Context, namespace, name string) (*v
 	}
 
 	startTime := metav1.NewTime(pod.startTime)
+	status := buildPodStatus(pod, v1.PodRunning, startTime,
+		v1.ContainerState{
+			Running: &v1.ContainerStateRunning{
+				StartedAt: startTime,
+			}})
+	return &status, nil
+}
 
-	status := &v1.PodStatus{
-		Phase:     v1.PodRunning,
+func buildPodStatus(pod *simPod, phase v1.PodPhase, startTime metav1.Time, containerState v1.ContainerState) v1.PodStatus {
+	status := v1.PodStatus{
+		Phase:     phase,
 		HostIP:    "1.2.3.4",
 		PodIP:     "5.6.7.8",
 		StartTime: &startTime,
@@ -317,15 +357,11 @@ func (p *Provider) GetPodStatus(ctx context.Context, namespace, name string) (*v
 			Image:        container.Image,
 			Ready:        true,
 			RestartCount: 0,
-			State: v1.ContainerState{
-				Running: &v1.ContainerStateRunning{
-					StartedAt: startTime,
-				},
-			},
+			State:        containerState,
 		})
 	}
 
-	return status, nil
+	return status
 }
 
 // GetPods returns a list of all pods known to be "running".
