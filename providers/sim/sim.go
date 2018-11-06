@@ -184,11 +184,14 @@ func (p *Provider) UpdatePod(ctx context.Context, pod *v1.Pod) error {
 		return err
 	}
 
-	// TODO: Existence checking needed?
-	// TODO: Keeping StartTime needed?
+	simPod, ok := p.pods.Load(key)
+	if !ok {
+		return fmt.Errorf("pod %q does not exist", key)
+	}
 
-	now := metav1.NewTime(time.Now())
-	p.pods.Store(key, simpod.SimPod{Pod: pod, StartTime: now, IsOverCapacity: false})
+	// TODO: Reschedule needed?
+	simPod.Pod = pod
+	p.pods.Store(key, simPod)
 
 	return nil
 }
