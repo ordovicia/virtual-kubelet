@@ -38,7 +38,6 @@ type Provider struct {
 	daemonEndpointPort int32
 	config             Config
 	pods               *simpod.PodMap
-	totalResourceReq   simResource
 }
 
 // Config contains a simulated virtual-kubelet's configurable parameters.
@@ -62,7 +61,6 @@ func NewSimProvider(providerConfig, nodeName string, internalIP string, daemonEn
 		daemonEndpointPort: daemonEndpointPort,
 		pods:               simpod.New(),
 		config:             config,
-		totalResourceReq:   simResource{},
 	}
 	return &provider, nil
 }
@@ -144,15 +142,37 @@ func (p *Provider) CreatePod(ctx context.Context, pod *v1.Pod) error {
 
 	now := metav1.NewTime(time.Now())
 
-	newTotalReq := getResourceReq(pod).add(p.totalResourceReq)
-	if isOverCapacity(newTotalReq, p.Capacity(ctx)) {
+	newTotalReq := p.totalResourceReq().add(getResourceReq(pod))
+	cap := p.Capacity(ctx)
+	if isOverCapacity(newTotalReq, cap) || p.runningPodsNum() >= cap.Pods().Value() {
 		p.pods.Store(key, simpod.SimPod{Pod: pod, StartTime: now, IsOverCapacity: true})
 	} else {
-		p.totalResourceReq = newTotalReq
 		p.pods.Store(key, simpod.SimPod{Pod: pod, StartTime: now, IsOverCapacity: false})
 	}
 
 	return nil
+}
+
+func (p *Provider) totalResourceReq() simResource {
+	resourceReq := simResource{}
+	p.pods.Range(func(_ string, pod simpod.SimPod) bool {
+		if !pod.IsOverCapacity {
+			resourceReq = resourceReq.add(getResourceReq(pod.Pod))
+		}
+		return true
+	})
+	return resourceReq
+}
+
+func (p *Provider) runningPodsNum() int64 {
+	podsNum := int64(0)
+	p.pods.Range(func(_ string, pod simpod.SimPod) bool {
+		if !pod.IsOverCapacity {
+			podsNum++
+		}
+		return true
+	})
+	return podsNum
 }
 
 // UpdatePod accepts a Pod definition and updates its reference.
@@ -182,7 +202,6 @@ func (p *Provider) DeletePod(ctx context.Context, pod *v1.Pod) error {
 		return err
 	}
 
-	p.totalResourceReq = p.totalResourceReq.sub(getResourceReq(pod))
 	p.pods.Delete(key)
 
 	return nil

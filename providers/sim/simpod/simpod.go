@@ -53,3 +53,11 @@ func (m *PodMap) ListPods() []*v1.Pod {
 	})
 	return pods
 }
+
+// Range applies a function to each pair of key and pod
+func (m *PodMap) Range(f func(string, SimPod) bool) {
+	g := func(key, pod interface{}) bool {
+		return f(key.(string), pod.(SimPod))
+	}
+	m.pods.Range(g)
+}
