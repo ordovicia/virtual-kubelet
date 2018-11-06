@@ -8,6 +8,7 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
+	"sort"
 	"time"
 
 	"k8s.io/api/core/v1"
@@ -209,11 +210,27 @@ func (p *Provider) ExecInContainer(name string, uid types.UID, container string,
 }
 
 // GetPodStatus returns the status of a pod by name that is "running".
-// returns nil if a pod by that name is not found.
+// It returns nil if a pod by that name is not found.
+// GetPodStatus also detects pods that exceeds the node's capacity.
 func (p *Provider) GetPodStatus(ctx context.Context, namespace, name string) (*v1.PodStatus, error) {
 	log.Printf("receive GetPodStatus %q\n", name)
 
-	now := metav1.NewTime(time.Now())
+	pods := p.pods.ListPods()
+
+	// Respect the pod creation order when resolving conflicts
+	sort.Sort(podsByCreationTime(pods))
+	unfit := getUnfitPods(pods, p.Capacity(ctx))
+	for _, pod := range unfit {
+		if pod.Namespace == namespace && pod.Name == name {
+			return &v1.PodStatus{
+				Phase:   v1.PodFailed,
+				Reason:  "CapacityExceeded",
+				Message: "Pod cannot be started due to exceeded capacity",
+			}, nil
+		}
+	}
+
+	now := metav1.NewTime(time.Now()) // TODO: correct?
 
 	status := &v1.PodStatus{
 		Phase:     v1.PodRunning,
@@ -261,14 +278,7 @@ func (p *Provider) GetPodStatus(ctx context.Context, namespace, name string) (*v
 // GetPods returns a list of all pods known to be "running".
 func (p *Provider) GetPods(ctx context.Context) ([]*v1.Pod, error) {
 	log.Printf("receive GetPods\n")
-
-	var pods []*v1.Pod
-	p.pods.Range(func(_ string, pod simpod.RunningPod) bool {
-		pods = append(pods, pod.Pod)
-		return true
-	})
-
-	return pods, nil
+	return p.pods.ListPods(), nil
 }
 
 // Capacity returns a resource list containing the capacity limits.
@@ -326,7 +336,6 @@ func (p *Provider) NodeConditions(ctx context.Context) []v1.NodeCondition {
 			Message:            "RouteController created a route",
 		},
 	}
-
 }
 
 // NodeAddresses returns a list of addresses for the node status
@@ -371,4 +380,3 @@ func buildKey(pod *v1.Pod) (string, error) {
 func buildKeyFromNames(namespace string, name string) (string, error) {
 	return fmt.Sprintf("%s-%s", namespace, name), nil
 }
-

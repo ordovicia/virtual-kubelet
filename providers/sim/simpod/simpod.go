@@ -42,8 +42,12 @@ func (m *PodMap) Delete(key string) {
 	m.pods.Delete(key)
 }
 
-// Range applies a function to each pair of key and pod.
-// It returns when the function returns false.
-func (m *PodMap) Range(f func(string, RunningPod) bool) {
-	m.Range(f)
+// ListPods returns an array of pods
+func (m *PodMap) ListPods() []*v1.Pod {
+	pods := []*v1.Pod{}
+	m.pods.Range(func(_, pod interface{}) bool {
+		pods = append(pods, pod.(RunningPod).Pod)
+		return true
+	})
+	return pods
 }
