@@ -8,7 +8,6 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
-	"sync"
 	"time"
 
 	"k8s.io/api/core/v1"
@@ -16,6 +15,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/remotecommand"
+
+	"github.com/virtual-kubelet/virtual-kubelet/providers/sim/simpod"
 )
 
 const (
@@ -33,14 +34,8 @@ type Provider struct {
 	nodeName           string
 	internalIP         string
 	daemonEndpointPort int32
-	pods               map[string]runningPod
+	pods               *simpod.PodMap
 	config             Config
-	podsLock           sync.Mutex
-}
-
-type runningPod struct {
-	pod             *v1.Pod
-	attainedSeconds int32
 }
 
 // Config contains a simulated virtual-kubelet's configurable parameters.
@@ -61,7 +56,7 @@ func NewSimProvider(providerConfig, nodeName string, internalIP string, daemonEn
 		nodeName:           nodeName,
 		internalIP:         internalIP,
 		daemonEndpointPort: daemonEndpointPort,
-		pods:               make(map[string]runningPod),
+		pods:               simpod.New(),
 		config:             config,
 	}
 	return &provider, nil
@@ -69,7 +64,9 @@ func NewSimProvider(providerConfig, nodeName string, internalIP string, daemonEn
 
 // loadConfig loads the given json configuration file.
 // If the file does not exist, falls back on the default config.
-func loadConfig(providerConfig, nodeName string) (config Config, err error) {
+func loadConfig(providerConfig, nodeName string) (Config, error) {
+	var config Config
+
 	if _, err := os.Stat(providerConfig); os.IsNotExist(err) {
 		config.CPU = defaultCPUCapacity
 		config.Memory = defaultMemoryCapacity
@@ -113,15 +110,12 @@ func loadConfig(providerConfig, nodeName string) (config Config, err error) {
 	return config, nil
 }
 
-func (p *Provider) updateClock() {
-	p.podsLock.Lock()
-	defer p.podsLock.Unlock()
-
-	for _, pod := range p.pods {
-		_ = pod
-		// TODO: pod.attainedSeconds +=
-	}
-}
+// func (p *Provider) updateClock() {
+// 	for _, pod := range p.pods {
+// 		_ = pod
+// 		// TODO: pod.attainedSeconds +=
+// 	}
+// }
 
 // CreatePod accepts a Pod definition and stores it in memory.
 func (p *Provider) CreatePod(ctx context.Context, pod *v1.Pod) error {
@@ -136,12 +130,9 @@ func (p *Provider) CreatePod(ctx context.Context, pod *v1.Pod) error {
 	if err != nil {
 		return err
 	}
-	_ = simSpec
+	_ = simSpec // TODO
 
-	p.podsLock.Lock()
-	defer p.podsLock.Unlock()
-
-	p.pods[key] = runningPod{pod, 0}
+	p.pods.Store(key, simpod.RunningPod{Pod: pod, AttainedSeconds: 0})
 
 	return nil
 }
@@ -155,22 +146,24 @@ func (p *Provider) UpdatePod(ctx context.Context, pod *v1.Pod) error {
 		return err
 	}
 
-	p.podsLock.Lock()
-	defer p.podsLock.Unlock()
+	// TODO: Existence checking needed?
+	// TODO: Keeping AttainedService needed?
 
-	assignedPod, ok := p.pods[key]
-	if !ok {
-		return fmt.Errorf("Pod %v does not exist", key)
-	}
+	// simPod, ok := p.pods.Load(key)
+	// if !ok {
+	// 	return fmt.Errorf("Pod %v does not exist", key)
+	// }
+	//
+	// simPod.Pod = pod
+	// p.pods.Store(key, simPod)
 
-	assignedPod.pod = pod
-	p.pods[key] = assignedPod
+	p.pods.Store(key, simpod.RunningPod{Pod: pod, AttainedSeconds: 0})
 
 	return nil
 }
 
 // DeletePod deletes the specified pod out of memory.
-func (p *Provider) DeletePod(ctx context.Context, pod *v1.Pod) (err error) {
+func (p *Provider) DeletePod(ctx context.Context, pod *v1.Pod) error {
 	log.Printf("receive DeletePod %q\n", pod.Name)
 
 	key, err := buildKey(pod)
@@ -178,16 +171,13 @@ func (p *Provider) DeletePod(ctx context.Context, pod *v1.Pod) (err error) {
 		return err
 	}
 
-	p.podsLock.Lock()
-	defer p.podsLock.Unlock()
-
-	delete(p.pods, key)
+	p.pods.Delete(key)
 
 	return nil
 }
 
 // GetPod returns a pod by name that is stored in memory.
-func (p *Provider) GetPod(ctx context.Context, namespace, name string) (pod *v1.Pod, err error) {
+func (p *Provider) GetPod(ctx context.Context, namespace, name string) (*v1.Pod, error) {
 	log.Printf("receive GetPod %q\n", name)
 
 	key, err := buildKeyFromNames(namespace, name)
@@ -195,14 +185,12 @@ func (p *Provider) GetPod(ctx context.Context, namespace, name string) (pod *v1.
 		return nil, err
 	}
 
-	p.podsLock.Lock()
-	defer p.podsLock.Unlock()
-
-	if pod, ok := p.pods[key]; ok {
-		return pod.pod, nil
+	pod, ok := p.pods.Load(key)
+	if !ok {
+		return nil, nil
 	}
 
-	return nil, nil
+	return pod.Pod, nil
 }
 
 // GetContainerLogs retrieves the logs of a container by name from the provider.
@@ -278,13 +266,11 @@ func (p *Provider) GetPodStatus(ctx context.Context, namespace, name string) (*v
 func (p *Provider) GetPods(ctx context.Context) ([]*v1.Pod, error) {
 	log.Printf("receive GetPods\n")
 
-	p.podsLock.Lock()
-	defer p.podsLock.Unlock()
-
 	var pods []*v1.Pod
-	for _, pod := range p.pods {
-		pods = append(pods, pod.pod)
-	}
+	p.pods.Range(func(_ string, pod simpod.RunningPod) bool {
+		pods = append(pods, pod.Pod)
+		return true
+	})
 
 	return pods, nil
 }
