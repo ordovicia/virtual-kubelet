@@ -36,6 +36,7 @@ type Provider struct {
 	daemonEndpointPort int32
 	config             Config
 	pods               *podMap
+	totalResourceUsage simResource
 }
 
 // Config contains a simulated virtual-kubelet's configurable parameters.
@@ -122,13 +123,14 @@ func updateNode(p *Provider, interval time.Duration) {
 	tick := time.Tick(interval)
 	for range tick {
 		now := time.Now()
+		p.totalResourceUsage = simResource{}
 
 		p.pods.foreach(func(key string, pod simPod) bool {
 			passedSeconds := int32(now.Sub(pod.startTime).Seconds())
 			if pod.isTerminated(passedSeconds) {
 				// pod.status = simPodTerminated
 			} else {
-				_ = resourceUsage
+				p.totalResourceUsage = p.totalResourceUsage.add(pod.resourceUsage(passedSeconds))
 			}
 
 			return true
@@ -292,12 +294,12 @@ func (p *Provider) GetPodStatus(ctx context.Context, namespace, name string) (*v
 			Phase:   v1.PodFailed,
 			Reason:  "CapacityExceeded",
 			Message: "Pod cannot be started due to exceeded capacity",
-	}
+		}
 	case simPodOk:
 		now := time.Now()
 		passedSeconds := int32(now.Sub(pod.startTime).Seconds())
 
-	startTime := metav1.NewTime(pod.startTime)
+		startTime := metav1.NewTime(pod.startTime)
 		if pod.isTerminated(passedSeconds) {
 			finishTime := metav1.NewTime(pod.startTime.Add(time.Duration(pod.totalSeconds()) * time.Second))
 			status = buildPodStatus(pod, v1.PodSucceeded, startTime,
@@ -311,10 +313,10 @@ func (p *Provider) GetPodStatus(ctx context.Context, namespace, name string) (*v
 					}})
 		} else {
 			status = buildPodStatus(pod, v1.PodRunning, startTime,
-		v1.ContainerState{
-			Running: &v1.ContainerStateRunning{
-				StartedAt: startTime,
-			}})
+				v1.ContainerState{
+					Running: &v1.ContainerStateRunning{
+						StartedAt: startTime,
+					}})
 		}
 	}
 
