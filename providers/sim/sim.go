@@ -138,7 +138,7 @@ func updateNode(p *Provider, interval time.Duration) {
 	}
 }
 
-// CreatePodccepts a Pod definition and stores it in memory.
+// CreatePod accepts a Pod definition and stores it in memory.
 func (p *Provider) CreatePod(ctx context.Context, pod *v1.Pod) error {
 	log.Printf("receive CreatePod %q\n", pod.Name)
 
