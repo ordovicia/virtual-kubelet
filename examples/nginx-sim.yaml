@@ -5,7 +5,7 @@ metadata:
   # labels:
   #   env: sim
   annotations:
-    simSpec: "[{\"seconds\":600,\"cpu\":\"1\",\"memory\":\"2Gi\",\"nvidia.com/gpu\":0},{\"seconds\":1200,\"cpu\":\"2\",\"memory\":\"4Gi\",\"nvidia.com/gpu\":1}]"
+    simSpec: "[{\"seconds\":5,\"cpu\":\"1\",\"memory\":\"2Gi\",\"nvidia.com/gpu\":0},{\"seconds\":10,\"cpu\":\"2\",\"memory\":\"4Gi\",\"nvidia.com/gpu\":1}]"
 spec:
   containers:
   - name: nginx
