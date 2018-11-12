@@ -119,50 +119,24 @@ func loadConfig(providerConfig, nodeName string) (Config, error) {
 }
 
 func updateNode(p *Provider, interval time.Duration) {
-	for {
+	tick := time.Tick(interval)
+	for range tick {
 		now := time.Now()
 
 		p.pods.foreach(func(key string, pod simPod) bool {
 			passedSeconds := int32(now.Sub(pod.startTime).Seconds())
-			phaseSecondsAcc := int32(0)
-			resourceUsage := simResource{}
-			terminated := true
-
-			log.Printf("now: %v, start: %v, diff: %v\n", now, pod.startTime, passedSeconds)
-
-			for _, phase := range pod.spec {
-				if passedSeconds < phaseSecondsAcc+phase.seconds {
-					resourceUsage = phase.resource
-					terminated = false
-					break
-				}
-
-				phaseSecondsAcc += phase.seconds
-			}
-
-			if terminated {
-				log.Printf("pod %v terminated", pod.pod.Name)
-				p.pods.delete(key)
-
-				startTime := metav1.NewTime(pod.startTime)
-				status := buildPodStatus(&pod, v1.PodSucceeded, startTime,
-					v1.ContainerState{
-						Terminated: &v1.ContainerStateTerminated{
-							StartedAt: startTime,
-						}})
-				_ = status
+			if pod.isTerminated(passedSeconds) {
+				// pod.status = simPodTerminated
 			} else {
 				_ = resourceUsage
 			}
 
 			return true
 		})
-
-		time.Sleep(interval)
 	}
 }
 
-// CreatePod accepts a Pod definition and stores it in memory.
+// CreatePodccepts a Pod definition and stores it in memory.
 func (p *Provider) CreatePod(ctx context.Context, pod *v1.Pod) error {
 	log.Printf("receive CreatePod %q\n", pod.Name)
 
@@ -171,31 +145,30 @@ func (p *Provider) CreatePod(ctx context.Context, pod *v1.Pod) error {
 		return err
 	}
 
-	now := time.Now()
-
 	simSpec, err := parseSimSpec(pod)
 	if err != nil {
 		return err
 	}
 
+	now := time.Now()
 	simPod := simPod{pod: pod, startTime: now, spec: simSpec}
-
-	newTotalReq := p.totalResourceReq().add(getResourceReq(pod))
+	newTotalReq := p.totalResourceReq(now).add(getResourceReq(pod))
 	cap := p.Capacity(ctx)
-	if isOverCapacity(newTotalReq, cap) || p.runningPodsNum() >= cap.Pods().Value() {
-		simPod.isOverCapacity = true
+	if isOverCapacity(newTotalReq, cap) || p.runningPodsNum(now) >= cap.Pods().Value() {
+		simPod.status = simPodOverCapacity
 	} else {
-		simPod.isOverCapacity = false
+		simPod.status = simPodOk
 	}
 	p.pods.store(key, simPod)
 
 	return nil
 }
 
-func (p *Provider) totalResourceReq() simResource {
+func (p *Provider) totalResourceReq(now time.Time) simResource {
 	resourceReq := simResource{}
 	p.pods.foreach(func(_ string, pod simPod) bool {
-		if !pod.isOverCapacity {
+		passedSeconds := int32(now.Sub(pod.startTime).Seconds())
+		if pod.status == simPodOk && !pod.isTerminated(passedSeconds) {
 			resourceReq = resourceReq.add(getResourceReq(pod.pod))
 		}
 		return true
@@ -203,10 +176,11 @@ func (p *Provider) totalResourceReq() simResource {
 	return resourceReq
 }
 
-func (p *Provider) runningPodsNum() int64 {
+func (p *Provider) runningPodsNum(now time.Time) int64 {
 	podsNum := int64(0)
 	p.pods.foreach(func(_ string, pod simPod) bool {
-		if !pod.isOverCapacity {
+		passedSeconds := int32(now.Sub(pod.startTime).Seconds())
+		if pod.status == simPodOk && !pod.isTerminated(passedSeconds) {
 			podsNum++
 		}
 		return true
@@ -300,7 +274,6 @@ func (p *Provider) ExecInContainer(name string, uid types.UID, container string,
 
 // GetPodStatus returns the status of a pod by name that is "running".
 // It returns nil if a pod by that name is not found.
-// GetPodStatus also detects pods that exceeds the node's capacity.
 func (p *Provider) GetPodStatus(ctx context.Context, namespace, name string) (*v1.PodStatus, error) {
 	log.Printf("receive GetPodStatus %q\n", name)
 
@@ -312,20 +285,39 @@ func (p *Provider) GetPodStatus(ctx context.Context, namespace, name string) (*v
 		return nil, nil
 	}
 
-	if pod.isOverCapacity {
-		return &v1.PodStatus{
+	var status v1.PodStatus
+	switch pod.status {
+	case simPodOverCapacity:
+		status = v1.PodStatus{
 			Phase:   v1.PodFailed,
 			Reason:  "CapacityExceeded",
 			Message: "Pod cannot be started due to exceeded capacity",
-		}, nil
 	}
+	case simPodOk:
+		now := time.Now()
+		passedSeconds := int32(now.Sub(pod.startTime).Seconds())
 
 	startTime := metav1.NewTime(pod.startTime)
-	status := buildPodStatus(pod, v1.PodRunning, startTime,
+		if pod.isTerminated(passedSeconds) {
+			finishTime := metav1.NewTime(pod.startTime.Add(time.Duration(pod.totalSeconds()) * time.Second))
+			status = buildPodStatus(pod, v1.PodSucceeded, startTime,
+				v1.ContainerState{
+					Terminated: &v1.ContainerStateTerminated{
+						ExitCode:   0,
+						Reason:     "Succeeded", // TODO
+						Message:    "All containers in the pod have voluntarily terminated",
+						StartedAt:  startTime,
+						FinishedAt: finishTime,
+					}})
+		} else {
+			status = buildPodStatus(pod, v1.PodRunning, startTime,
 		v1.ContainerState{
 			Running: &v1.ContainerStateRunning{
 				StartedAt: startTime,
 			}})
+		}
+	}
+
 	return &status, nil
 }
 

@@ -13,13 +13,19 @@ type podMap struct {
 	pods sync.Map
 }
 
-// simPod represents a pod in the node with attained time
 type simPod struct {
-	pod            *v1.Pod
-	startTime      time.Time
-	isOverCapacity bool
-	spec           simSpec
+	pod       *v1.Pod
+	startTime time.Time
+	status    simPodStatus
+	spec      simSpec
 }
+
+type simPodStatus int
+
+const (
+	simPodOk simPodStatus = iota
+	simPodOverCapacity
+)
 
 func (m *podMap) load(key string) (simPod, bool) {
 	pod, ok := m.pods.Load(key)
@@ -53,4 +59,27 @@ func (m *podMap) foreach(f func(string, simPod) bool) {
 		return f(key.(string), pod.(simPod))
 	}
 	m.pods.Range(g)
+}
+
+func (p *simPod) resourceUsage(passedSeconds int32) simResource {
+	phaseSecondsAcc := int32(0)
+	for _, phase := range p.spec {
+		if passedSeconds < phaseSecondsAcc+phase.seconds {
+			return phase.resource
+		}
+		phaseSecondsAcc += phase.seconds
+	}
+	return simResource{}
+}
+
+func (p *simPod) totalSeconds() int32 {
+	phaseSecondsTotal := int32(0)
+	for _, phase := range p.spec {
+		phaseSecondsTotal += phase.seconds
+	}
+	return phaseSecondsTotal
+}
+
+func (p *simPod) isTerminated(passedSeconds int32) bool {
+	return passedSeconds >= p.totalSeconds()
 }
